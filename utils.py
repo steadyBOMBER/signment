@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import random
@@ -11,7 +12,7 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel, HttpUrl, ValidationError
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from flask_sqlalchemy import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError  # Updated import
 from rich.console import Console
 from rich.panel import Panel
 from email.mime.multipart import MIMEMultipart
@@ -479,7 +480,7 @@ def process_notification_queue():
             console.print(Panel(f"[error]Notification processing failed: {e}[/error]", title="Notification Error", border_style="red"))
             eventlet.sleep(5)
 
-# Start notification queue processing
+# Start notification queue on module import
 def start_notification_queue():
     """Start the notification queue processor."""
     try:
@@ -956,3 +957,4 @@ def send_manual_webhook(call, tracking_number):
 
 # Start notification queue on module import
 start_notification_queue()
+```
