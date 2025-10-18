@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import random
@@ -957,4 +956,3 @@ def send_manual_webhook(call, tracking_number):
 
 # Start notification queue on module import
 start_notification_queue()
-```
