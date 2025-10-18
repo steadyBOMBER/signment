@@ -1,4 +1,3 @@
-# Patch for gevent/gunicorn compatibility
 import eventlet
 eventlet.monkey_patch()
 
@@ -16,6 +15,7 @@ from email.mime.text import MIMEText
 # Third-party imports
 import requests
 import smtplib
+import logging
 from flask import Flask, render_template, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_limiter import Limiter
@@ -49,7 +49,12 @@ try:
         websocket_server=os.getenv("WEBSOCKET_SERVER", "https://signment.onrender.com"),
         allowed_admins=[int(uid) for uid in os.getenv("ALLOWED_ADMINS", "").split(",") if uid],
         valid_statuses=os.getenv("VALID_STATUSES", "Pending,In_Transit,Out_for_Delivery,Delivered,Returned,Delayed").split(","),
-        route_templates=json.loads(os.getenv("ROUTE_TEMPLATES", '{"Lagos, NG": ["Lagos, NG"]}'))
+        route_templates=json.loads(os.getenv("ROUTE_TEMPLATES", '{"Lagos, NG": ["Lagos, NG"]}')),
+        smtp_host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        smtp_port=int(os.getenv("SMTP_PORT", 587)),
+        smtp_user=os.getenv("SMTP_USER", ""),
+        smtp_pass=os.getenv("SMTP_PASS", ""),
+        smtp_from=os.getenv("SMTP_FROM", "no-reply@example.com")
     )
     app.config.update(
         TELEGRAM_BOT_TOKEN=config.telegram_bot_token,
@@ -57,11 +62,11 @@ try:
         WEBSOCKET_SERVER=config.websocket_server,
         SECRET_KEY=os.getenv("SECRET_KEY", "default-secret-key"),
         SQLALCHEMY_DATABASE_URI=os.getenv("SQLALCHEMY_DATABASE_URI", "sqlite:///shipments.db"),
-        SMTP_HOST=os.getenv("SMTP_HOST", "smtp.gmail.com"),
-        SMTP_PORT=int(os.getenv("SMTP_PORT", 587)),
-        SMTP_USER=os.getenv("SMTP_USER", ""),
-        SMTP_PASS=os.getenv("SMTP_PASS", ""),
-        SMTP_FROM=os.getenv("SMTP_FROM", "no-reply@example.com"),
+        SMTP_HOST=config.smtp_host,
+        SMTP_PORT=config.smtp_port,
+        SMTP_USER=config.smtp_user,
+        SMTP_PASS=config.smtp_pass,
+        SMTP_FROM=config.smtp_from,
         RECAPTCHA_SITE_KEY=os.getenv("RECAPTCHA_SITE_KEY", "your-site-key"),
         RECAPTCHA_SECRET_KEY=os.getenv("RECAPTCHA_SECRET_KEY", "your-secret-key"),
         RECAPTCHA_VERIFY_URL="https://www.google.com/recaptcha/api/siteverify",
@@ -349,7 +354,7 @@ def keep_alive():
             else:
                 flask_logger.error("Max retries exceeded for keep-alive ping")
                 console.print(Panel("[error]Max retries exceeded for keep-alive ping[/error]", title="Keep-Alive Error", border_style="red"))
-        time.sleep(60)
+        time.sleep(300)  # Increased interval to reduce log spam
 
 def simulate_tracking(tracking_number):
     """Simulate shipment tracking with status updates and notifications."""
@@ -449,6 +454,9 @@ def simulate_tracking(tracking_number):
                 sim_logger.debug(f"Updated shipment: status={status}, checkpoints={len(checkpoints)}", extra={'tracking_number': sanitized_tn})
 
                 if send_notification and recipient_email:
+                    queue_length = redis_client.llen("notification_queue") if redis_client else 0
+                    sim_logger.debug(f"Enqueuing notification, queue length: {queue_length}", extra={'tracking_number': sanitized_tn})
+                    console.print(f"[info]Enqueuing notification for {sanitized_tn}, queue length: {queue_length}[/info]")
                     enqueue_notification(sanitized_tn, "email", {
                         "status": status,
                         "checkpoints": ';'.join(checkpoints),
@@ -457,6 +465,9 @@ def simulate_tracking(tracking_number):
                     })
 
                 if webhook_url:
+                    queue_length = redis_client.llen("notification_queue") if redis_client else 0
+                    sim_logger.debug(f"Enqueuing webhook, queue length: {queue_length}", extra={'tracking_number': sanitized_tn})
+                    console.print(f"[info]Enqueuing webhook for {sanitized_tn}, queue length: {queue_length}[/info]")
                     enqueue_notification(sanitized_tn, "webhook", {
                         "status": status,
                         "checkpoints": checkpoints,
@@ -649,7 +660,14 @@ def trigger_broadcast(tracking_number):
 @app.route('/health', methods=['GET'])
 def health_check():
     """Perform health check for application components."""
-    status = {'status': 'healthy', 'database': 'ok', 'redis': 'unavailable', 'smtp': 'ok', 'telegram': 'unavailable'}
+    status = {
+        'status': 'healthy',
+        'database': 'ok',
+        'redis': 'unavailable',
+        'smtp': 'ok',
+        'telegram': 'unavailable',
+        'notification_queue': 'unavailable'
+    }
     try:
         inspector = inspect(db.engine)
         status['database'] = 'ok' if inspector.has_table('shipments') else 'shipments table missing'
@@ -662,8 +680,10 @@ def health_check():
             redis_client.set("test", "ping")
             redis_client.delete("test")
             status['redis'] = 'ok'
+            status['notification_queue'] = f"length: {redis_client.llen('notification_queue')}"
     except Exception as e:
         status['redis'] = str(e)
+        status['notification_queue'] = str(e)
     try:
         with smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'], timeout=5) as server:
             server.starttls()
@@ -675,7 +695,7 @@ def health_check():
         status['telegram'] = 'ok' if check_bot_status() else 'unavailable'
     except Exception as e:
         status['telegram'] = str(e)
-    if status['status'] == 'healthy' and any(v != 'ok' for v in [status['database'], 'smtp']):
+    if status['status'] == 'healthy' and any(v != 'ok' for v in [status['database'], 'smtp', 'redis']):
         status['status'] = 'unhealthy'
     flask_logger.info("Health check", extra=status)
     console.print(f"[info]Health check: {status}[/info]")
@@ -788,4 +808,4 @@ if __name__ == '__main__':
     keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
     keep_alive_thread.start()
     console.print("[info]Keep-alive thread started[/info]")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=app.config.get('FLASK_ENV') == 'development')
+    socketio.run(app, host='0.0.0.0', port=10000, debug=app.config.get('FLASK_ENV') == 'development')
